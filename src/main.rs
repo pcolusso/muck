@@ -28,7 +28,7 @@ fn main() -> Result<()> {
 
     match &app.command {
         Commands::Checkout => {
-            let current = repo.head()?.shorthand().unwrap_or("HEAD").to_string();
+            let current = repo.head().context("Repo may have no commits?")?.shorthand().unwrap_or("HEAD").to_string();
             dbg!(&current);
 
             if current != app.main {
@@ -51,8 +51,6 @@ fn main() -> Result<()> {
 
             repo.set_head(&format!("refs/heads/{}", &app.scratch))
                 .context("Failed to switch to scratch branch")?;
-            // Make the working dir match scratch
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
             println!(
                 "Created and switched to branch '{}' from '{}'",
@@ -62,14 +60,13 @@ fn main() -> Result<()> {
         }
         Commands::Checkin => {
             let current = repo.head()?.shorthand().unwrap_or("HEAD").to_string();
-            if current != app.main {
+            if current != app.scratch {
                 bail!("Not on the scratch branch");
             }
 
             let root_ref = format!("refs/heads/{}", &app.main);
             repo.set_head(&root_ref)
                 .context("Failed to set HEAD to root branch")?;
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
             println!("Checked out '{}'", &app.main);
 
             let status = Command::new("git")
