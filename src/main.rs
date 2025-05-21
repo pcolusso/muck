@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use git2::Repository;
 use std::{process::Command, thread::sleep, time::Duration};
@@ -12,6 +12,8 @@ struct App {
     scratch: String,
     #[command(subcommand)]
     command: Commands,
+    #[arg(short, long, default_value_t = true)]
+    use_smerge: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -29,7 +31,7 @@ fn main() -> Result<()> {
             let current = repo.head()?.shorthand().unwrap_or("HEAD").to_string();
             dbg!(&current);
 
-            if current == app.main {
+            if current != app.main {
                 bail!("Not on the main branch");
             }
 
@@ -59,6 +61,11 @@ fn main() -> Result<()> {
             println!("Go nuts!")
         }
         Commands::Checkin => {
+            let current = repo.head()?.shorthand().unwrap_or("HEAD").to_string();
+            if current != app.main {
+                bail!("Not on the scratch branch");
+            }
+
             let root_ref = format!("refs/heads/{}", &app.main);
             repo.set_head(&root_ref)
                 .context("Failed to set HEAD to root branch")?;
@@ -76,10 +83,17 @@ fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("git merge --squash failed"));
             }
 
-            Command::new("git")
-                .arg("commit")
-                .status()
-                .context("Failed to invoke git commit")?;
+            if app.use_smerge {
+                Command::new("smerge")
+                    .arg(".")
+                    .status()
+                    .context("Unable to open sublime")?;
+            } else {
+                Command::new("git")
+                    .arg("commit")
+                    .status()
+                    .context("Failed to invoke git commit")?;
+            }
         }
     }
 
