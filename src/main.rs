@@ -29,7 +29,6 @@ fn main() -> Result<()> {
     match &app.command {
         Commands::Checkout => {
             let current = repo.head().context("Repo may have no commits?")?.shorthand().unwrap_or("HEAD").to_string();
-            dbg!(&current);
 
             if current != app.main {
                 bail!("Not on the main branch");
