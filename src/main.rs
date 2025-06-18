@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use git2::Repository;
-use std::{process::Command, thread::sleep, time::Duration};
+use git2::{BranchType, Repository};
+use std::{fmt::format, process::Command, thread::sleep, time::Duration, env};
 
 #[derive(Parser, Debug)]
 #[command(author)]
@@ -25,59 +25,58 @@ enum Commands {
 fn main() -> Result<()> {
     let app = App::parse();
     let repo = Repository::discover(".").context("Not a git repository")?;
+    let current_branch = repo.head().context("Repo may have no commits?")?.shorthand().unwrap_or("HEAD").to_string();
 
     match &app.command {
         Commands::Checkout => {
-            let current = repo.head().context("Repo may have no commits?")?.shorthand().unwrap_or("HEAD").to_string();
-
-            if current != app.main {
-                bail!("Not on the main branch");
+            // Confirm we're not in a worktree.
+            if repo.worktrees()?.iter().any( |wt| matches!(wt, Some(s) if *s == current_branch)) {
+                bail!("We're in a worktree!");
             }
 
-            // Reset the branch
-            if let Ok(mut branch) = repo.find_branch(&app.scratch, git2::BranchType::Local) {
-                println!("Deleting existing scratch branch...");
-                sleep(Duration::from_secs(3));
-                branch
-                    .delete()
-                    .context("Failed to delete existing scratch branch")?;
-                println!("Deleted existing branch '{}'", &app.scratch);
-            }
+            let name = format!("scratch-{}", petname::petname(2, "-").expect("Wuh? No random?"));
+            let dest = env::temp_dir().join(&name);
 
-            let obj = repo.revparse_single("HEAD")?;
-            repo.branch(&app.scratch, &obj.peel_to_commit()?, false)
-                .context("Failed to create scratch branch")?;
+            repo.worktree(&name, &dest, None)?;
 
-            repo.set_head(&format!("refs/heads/{}", &app.scratch))
-                .context("Failed to switch to scratch branch")?;
+            let shell = env::var("SHELL").unwrap_or("/bin/bash".into());
+            // We can't affect the shell that spawned us, but we can spawn a subshell!
+            Command::new(&shell).current_dir(dest).status()?;
 
-            println!(
-                "Created and switched to branch '{}' from '{}'",
-                &app.scratch, current
-            );
-            println!("Go nuts!")
+            // In theory, we could auto squash merge back in...
+            println!("You're back in the real world, the worktree you were in is {}, from {}", name, current_branch);
         }
         Commands::Checkin => {
-            let current = repo.head()?.shorthand().unwrap_or("HEAD").to_string();
-            if current != app.scratch {
-                bail!("Not on the scratch branch");
+            // Confirm we in a worktree.
+            if !repo.worktrees()?.iter().any( |wt| matches!(wt, Some(s) if *s == current_branch)) {
+                bail!("We're in a worktree!");
             }
 
-            let root_ref = format!("refs/heads/{}", &app.main);
-            repo.set_head(&root_ref)
-                .context("Failed to set HEAD to root branch")?;
-            println!("Checked out '{}'", &app.main);
+            // Checkout this branch, probably not necessary?
+            let branch_ref = repo.find_reference(&format!("refs/heads/{}", current_branch))?;
+            let branch_commit = branch_ref.peel_to_commit()?;
 
-            let status = Command::new("git")
-                .arg("merge")
-                .arg("--squash")
-                .arg(&app.scratch)
-                .status()
-                .context("Failed to start git squash merge")?;
+            // Checkout main
+            let main_branch = repo.find_branch(&app.main, BranchType::Local)?;
+            let main_ref = main_branch.get();
+            repo.set_head(main_ref.name().expect("Main ref doesn't have a name?"))?;
+            // TODO: Find a reasonable checkout mode.
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
 
-            if !status.success() {
-                return Err(anyhow::anyhow!("git merge --squash failed"));
-            }
+            let main_commit = main_ref.peel_to_commit()?;
+            let mut index = repo.index()?;
+
+            let branch_tree = branch_commit.tree()?;
+            let main_tree = main_commit.tree()?;
+
+            let merge_base_oid = repo.merge_base(main_commit.id(), branch_commit.id())?;
+            let ancestor_commit = repo.find_commit(merge_base_oid)?;
+            let ancestor_tree = ancestor_commit.tree()?;
+
+            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+            repo.merge_trees(&ancestor_tree, &main_tree, &branch_tree, None)?;
+
+            index.write()?;
 
             if app.use_smerge {
                 Command::new("smerge")
