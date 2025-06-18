@@ -110,6 +110,10 @@ fn main() -> Result<()> {
             let shell = env::var("SHELL").unwrap_or("/bin/bash".into());
 
             // TODO: We could also copy build artifacts, which may help with Rust projects
+            println!("\x1b[2J\x1b[H"); // Clear screen and move cursor to top
+            println!("Worktree created! Dropping you into a subshell.");
+            println!("When this shell exits, we'll clear this and squash merge back in");
+            println!("Make sure to commit all changes!\n");
             process::Command::new(&shell).current_dir(dest).status()?;
 
             process::Command::new("git")
