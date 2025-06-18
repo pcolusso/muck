@@ -1,15 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use git2::{BranchType, Repository};
-use std::{fmt::format, process::Command, thread::sleep, time::Duration, env};
+use std::{env, fs, process};
 
 #[derive(Parser, Debug)]
 #[command(author)]
 struct App {
     #[arg(short, long, default_value = "master")]
     main: String,
-    #[arg(short, long, default_value = "scratch")]
-    scratch: String,
     #[command(subcommand)]
     command: Commands,
     #[arg(short, long, default_value_t = true)]
@@ -25,66 +23,98 @@ enum Commands {
 fn main() -> Result<()> {
     let app = App::parse();
     let repo = Repository::discover(".").context("Not a git repository")?;
-    let current_branch = repo.head().context("Repo may have no commits?")?.shorthand().unwrap_or("HEAD").to_string();
+    let current_branch = repo
+        .head()
+        .context("Repo may have no commits?")?
+        .shorthand()
+        .unwrap_or("HEAD")
+        .to_string();
 
     match &app.command {
         Commands::Checkout => {
             // Confirm we're not in a worktree.
-            if repo.worktrees()?.iter().any( |wt| matches!(wt, Some(s) if *s == current_branch)) {
+            if repo
+                .worktrees()?
+                .iter()
+                .any(|wt| matches!(wt, Some(s) if *s == current_branch))
+            {
                 bail!("We're in a worktree!");
             }
 
-            let name = format!("scratch-{}", petname::petname(2, "-").expect("Wuh? No random?"));
+            let name = format!(
+                "scratch-{}",
+                petname::petname(2, "-").expect("Wuh? No random?")
+            );
             let dest = env::temp_dir().join(&name);
 
             repo.worktree(&name, &dest, None)?;
 
             let shell = env::var("SHELL").unwrap_or("/bin/bash".into());
             // We can't affect the shell that spawned us, but we can spawn a subshell!
-            Command::new(&shell).current_dir(dest).status()?;
+            process::Command::new(&shell).current_dir(dest).status()?;
 
             // In theory, we could auto squash merge back in...
-            println!("You're back in the real world, the worktree you were in is {}, from {}", name, current_branch);
+            println!(
+                "You're back in the real world, the worktree you were in is {}, from {}",
+                name, current_branch
+            );
         }
         Commands::Checkin => {
+            let worktrees = repo.worktrees()?;
             // Confirm we in a worktree.
-            if !repo.worktrees()?.iter().any( |wt| matches!(wt, Some(s) if *s == current_branch)) {
+            if worktrees
+                .iter()
+                .any(|wt| matches!(wt, Some(s) if *s == current_branch))
+            {
                 bail!("We're in a worktree!");
             }
 
-            // Checkout this branch, probably not necessary?
-            let branch_ref = repo.find_reference(&format!("refs/heads/{}", current_branch))?;
-            let branch_commit = branch_ref.peel_to_commit()?;
+            let mut most_recent = None;
+            // Find the most recently updated worktree
+            for w in worktrees.iter().flatten() {
+                let worktree = repo.find_worktree(w)?;
+                let path = worktree.path();
+                if let Ok(metadata) = fs::metadata(path) {
+                    if let Ok(modified_time) = metadata.modified() {
+                        match &most_recent {
+                            None => {
+                                most_recent = Some((worktree, modified_time));
+                            }
+                            Some((_, current_time)) => {
+                                if modified_time > *current_time {
+                                    most_recent = Some((worktree, modified_time));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
-            // Checkout main
-            let main_branch = repo.find_branch(&app.main, BranchType::Local)?;
-            let main_ref = main_branch.get();
-            repo.set_head(main_ref.name().expect("Main ref doesn't have a name?"))?;
-            // TODO: Find a reasonable checkout mode.
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+            let worktree = most_recent.expect("Couldn't find a worktree.").0;
+            let dest = worktree.path();
+            let w_repo = Repository::open(dest)?;
+            let w_head = w_repo.head()?;
+            let w_branch = w_head.shorthand().expect("Detached?");
 
-            let main_commit = main_ref.peel_to_commit()?;
-            let mut index = repo.index()?;
+            // Keep it simple, we're just gonna use the command for now
 
-            let branch_tree = branch_commit.tree()?;
-            let main_tree = main_commit.tree()?;
+            process::Command::new("git")
+                .args(["merge", "--squash", w_branch])
+                .status()
+                .context("Failed to squash merge")?;
 
-            let merge_base_oid = repo.merge_base(main_commit.id(), branch_commit.id())?;
-            let ancestor_commit = repo.find_commit(merge_base_oid)?;
-            let ancestor_tree = ancestor_commit.tree()?;
-
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
-            repo.merge_trees(&ancestor_tree, &main_tree, &branch_tree, None)?;
-
-            index.write()?;
+            process::Command::new("git")
+                .args(["worktree", "remove", w_branch])
+                .status()
+                .context("Faliled to remove")?;
 
             if app.use_smerge {
-                Command::new("smerge")
+                process::Command::new("smerge")
                     .arg(".")
                     .status()
                     .context("Unable to open sublime")?;
             } else {
-                Command::new("git")
+                process::Command::new("git")
                     .arg("commit")
                     .status()
                     .context("Failed to invoke git commit")?;
