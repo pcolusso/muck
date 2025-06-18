@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use git2::Repository;
-use std::{process::Command, thread::sleep, time::Duration};
+use std::{env, process, thread, time};
 
 #[derive(Parser, Debug)]
 #[command(author)]
@@ -20,6 +20,7 @@ struct App {
 enum Commands {
     Checkout,
     Checkin,
+    Auto,
 }
 
 fn main() -> Result<()> {
@@ -28,7 +29,12 @@ fn main() -> Result<()> {
 
     match &app.command {
         Commands::Checkout => {
-            let current = repo.head().context("Repo may have no commits?")?.shorthand().unwrap_or("HEAD").to_string();
+            let current = repo
+                .head()
+                .context("Repo may have no commits?")?
+                .shorthand()
+                .unwrap_or("HEAD")
+                .to_string();
 
             if current != app.main {
                 bail!("Not on the main branch");
@@ -37,7 +43,7 @@ fn main() -> Result<()> {
             // Reset the branch
             if let Ok(mut branch) = repo.find_branch(&app.scratch, git2::BranchType::Local) {
                 println!("Deleting existing scratch branch...");
-                sleep(Duration::from_secs(3));
+                thread::sleep(time::Duration::from_secs(3));
                 branch
                     .delete()
                     .context("Failed to delete existing scratch branch")?;
@@ -68,7 +74,7 @@ fn main() -> Result<()> {
                 .context("Failed to set HEAD to root branch")?;
             println!("Checked out '{}'", &app.main);
 
-            let status = Command::new("git")
+            let status = process::Command::new("git")
                 .arg("merge")
                 .arg("--squash")
                 .arg(&app.scratch)
@@ -80,12 +86,49 @@ fn main() -> Result<()> {
             }
 
             if app.use_smerge {
-                Command::new("smerge")
+                process::Command::new("smerge")
                     .arg(".")
                     .status()
                     .context("Unable to open sublime")?;
             } else {
-                Command::new("git")
+                process::Command::new("git")
+                    .arg("commit")
+                    .status()
+                    .context("Failed to invoke git commit")?;
+            }
+        }
+        Commands::Auto => {
+            let name = format!(
+                "scratch-{}",
+                petname::petname(2, "-").expect("Wuh? No random?")
+            );
+            let dest = env::temp_dir().join(&name);
+
+            repo.worktree(&name, &dest, None)?;
+
+            // Enter a subshell, when this exits, we'll merge back in.
+            let shell = env::var("SHELL").unwrap_or("/bin/bash".into());
+
+            // TODO: We could also copy build artifacts, which may help with Rust projects
+            process::Command::new(&shell).current_dir(dest).status()?;
+
+            process::Command::new("git")
+                .args(["merge", "--squash", &name])
+                .status()
+                .context("Failed to squash merge")?;
+
+            process::Command::new("git")
+                .args(["worktree", "remove", &name])
+                .status()
+                .context("Faliled to remove")?;
+
+            if app.use_smerge {
+                process::Command::new("smerge")
+                    .arg(".")
+                    .status()
+                    .context("Unable to open sublime")?;
+            } else {
+                process::Command::new("git")
                     .arg("commit")
                     .status()
                     .context("Failed to invoke git commit")?;

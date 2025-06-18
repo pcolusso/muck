@@ -7,3 +7,4 @@ edition = "2024"
 anyhow = "1.0.98"
 clap = { version = "4.5.38", features = ["derive"] }
 git2 = "0.20.2"
+petname = "2.0.2"
